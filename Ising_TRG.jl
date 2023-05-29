@@ -1,31 +1,42 @@
 using LinearAlgebra
+using Plots
 
 # Based on https://tensornetwork.org/trg/ - Plain TRG 
 
-# TODO: Normalize the coarse-grained tensor after each iteration
+# TODO: Check whether the normalization factor is correct to use and why the data look to hover around very small values close to 0
 # TODO: Check contraction order in coarse_grain function is optimal
 # TODO: Generalize to any Hamiltonian (classical or quantum) and boundary conditions
 
-# Define a temperature T
-temp = 1
-beta = 1/temp
+function get_TRG_initial_tensor(beta)
 
-# 4-tensor where each index has dimension 2
-# This defines the basic building block of the two dimensional tensor network which corresponds to the Ising model partition function
-# Given the definition is A_{t,r,b,l} = exp(-(1/T) * (tt*rr + rr*bb + bb*ll + ll*tt)) where pp = 2*p-3 for p in [t,r,b,l] this is just because the indices t,r,b,l 
-# go from 1 to 2 and we want the spin variables to take value -1, 1
-A_initial = zeros(Float64, 2, 2, 2, 2)
+    # 4-tensor where each index has dimension 2
+    # This defines the basic building block of the two dimensional tensor network which corresponds to the Ising model partition function
+    # Given the definition is A_{t,r,b,l} = exp(-(1/T) * (tt*rr + rr*bb + bb*ll + ll*tt)) where pp = 2*p-3 for p in [t,r,b,l] this is just because the indices t,r,b,l 
+    # go from 1 to 2 and we want the spin variables to take value -1, 1
+    A_initial = zeros(Float64, 2, 2, 2, 2)
 
-function f(t, r, b, l)
-    return ((2*t-3)*(2*r-3) + (2*r-3)*(2*b-3) + (2*b-3)*(2*l-3) + (2*l-3)*(2*t-3))
-end
+    function Hamiltonian_pattern(t, r, b, l)
 
-# Return an iterator over the product of several iterators. Each generated element is a tuple whose ith element comes from the ith argument iterator. The first iterator changes the fastest.
-values = [1, 2]
-combinations = collect(Iterators.product(values, values, values, values))
-for combination in combinations
-    t, r, b, l = combination
-    A_initial[t, r, b, l] = exp(-beta*f(t, r, b, l))
+        """
+
+        Since the Hamiltonian is sigma_i * sigma_j where i and j are nearest neighbours there exists for every i index 4 neighbours.
+        The A tensor to be used by the TRG lies in the middle of 4 spins as the spins live on the tensor's edges.
+
+        """
+
+        return ((2*t-3)*(2*r-3) + (2*r-3)*(2*b-3) + (2*b-3)*(2*l-3) + (2*l-3)*(2*t-3))
+    end
+
+    # Return an iterator over the product of several iterators. Each generated element is a tuple whose ith element comes from the ith argument iterator. The first iterator changes the fastest.
+    values = [1, 2]
+    combinations = collect(Iterators.product(values, values, values, values))
+    for combination in combinations
+        t, r, b, l = combination
+        A_initial[t, r, b, l] = exp(-beta*Hamiltonian_pattern(t, r, b, l))
+    end
+
+    return A_initial
+
 end
 
 function contraction(A, c_A::Tuple, B, c_B::Tuple)::Array{ComplexF64}
@@ -149,53 +160,83 @@ end
 
 function coarse_grain(T, nsv)
 
+    """
+
+    The index convention for tensor A is:
+
+         1
+         |
+    4 -- A --- 2 
+         |
+         3
+
+    where 1 = t, 2 = l, 3 = b, 4 = r
+
+    """
+
+    # Prepare two tensors into matrices such that svd can be performed on them
     T_1 = permutedims(T, (1, 4, 3, 2)) # t, l, b, r
     t, l, b, r = size(T_1)
     T_1 = reshape(T_1, (t*l, b*r)) # (t, l), (b, r)
     T_2 = reshape(T, (t*r, b*l)) # (t, r), (b, l)
 
+    # Perform the svd
     svd_1 = svd(T_1)
     svd_2 = svd(T_2)
 
+    # These tensors from svd_1 will produce tensors F_1, F_3
     diag_S_1 = svd_1.S # s1
     s_1 = min(nsv, length(diag_S_1))
     U_1 = svd_1.U[:, 1:s_1] # (t, l), s1 
     sqrt_S_1 = Diagonal(sqrt.(diag_S_1[1:s_1])) # s1, s1
     Vt_1 = svd_1.Vt[1:s_1, :] # s1, (b, r)
 
+    # These tensors from svd_1 will produce tensors F_2, F_4
     diag_S_2 = svd_2.S # s2
     s_2 = min(nsv, length(diag_S_2))
     U_2 = svd_2.U[:, 1:s_2] # (t, r), s2
     sqrt_S_2 = Diagonal(sqrt.(diag_S_2[1:s_2])) # s2, s2
     Vt_2 = svd_2.Vt[1:s_2, :] # s2, (b, l)
 
+    # Multiply the square root of the singular value matrix on U and V respectively to get F_1, F_2, F_3, F_4
     F_1 = U_1*sqrt_S_1 # (t, l), s1
     F_3 = sqrt_S_1*Vt_1 # s1, (b, r)
-
     F_2 = U_2*sqrt_S_2 # (t, r), s2
     F_4 = sqrt_S_2*Vt_2 # s2, (b, l)
 
+    # Reshape F_1, F_2, F_3, F_4, to open up the original indices merged together to perform svd
     F_1 = reshape(F_1, (t, l, s_1)) # t, l, s1
     F_3 = reshape(F_3, (s_1, b, r)) # s1', b, r
-
     F_2 = reshape(F_2, (t, r, s_2)) # t, r, s2
     F_4 = reshape(F_4, (s_2, b, l)) # s2', b, l
 
+    # Contract the F_1, F_2, F_3, F_4 to obtain the new coarse grained A tensor
     tmp_1 = contraction(F_1, (2,), F_4, (3,)) # t, s1, s2', b 
     tmp_2 = contraction(F_2, (2,), F_3, (3,)) # t, s2, s1', b
     tmp_3 = contraction(tmp_1, (1, 4), tmp_2, (1, 4)) # s1, s2', s2, s1'
-    
+
+    # Permute the indices into the order of the convention
     T_final = permutedims(tmp_3, (2, 1, 3, 4)) # s2', s1, s2, s1'
 
-    return T_final
+    # Normalize by the highest value in the T_final tensor
+    normalization_factor = argmax(abs2, T_final)
+
+    # Normalize by the higher singular value of the T_final tensor after it is transformed to a matrix
+    # s_2_dash, s_1, s_2, s_1_dash = size(T_final)
+    # normalization_factor = argmax(abs2, svd(reshape(T_final, (s_2_dash*s_1, s_2*s_1_dash))).S)
+
+    return T_final/normalization_factor
 
 end
 
-function TRG(T, N, max_dim)
+function TRG(T, N, max_dim; verbose = false)
 
     N_spins = N*N
     N_tensors = N_spins // 2
-    for i in 1:log2(N_tensors)
+    for i in 1:Int(log2(N_tensors))
+        if verbose
+            println("Iteration number: ", i, ", Size of A tensor: ", size(T))
+        end
         T = coarse_grain(T, max_dim) 
     end
 
@@ -207,7 +248,37 @@ function TRG(T, N, max_dim)
 
 end
 
-N = 4
-max_dim = 20
-result = TRG(A_initial, N, max_dim)
-println(result)
+function get_free_energy_density(Z, beta)
+
+    return (-1/(beta*N*N))*log(Z)
+
+end
+
+pow = 16
+N = 2^(pow)
+max_dim_list = [10, 12]
+temp_list = LinRange(2, 3, 5)
+available_markers = [:+, :x, :diamond, :hexagon, :square, :circle, :star4]
+for (max_dim_idx, max_dim) in enumerate(max_dim_list)
+    local f_list = []
+    println("-----------------------------------------")
+    for temp in temp_list
+        println("Starting temperature: ", temp)
+        beta = 1/temp
+        A_initial = get_TRG_initial_tensor(beta)
+        Z = TRG(A_initial, N, max_dim, verbose = true)
+        f = get_free_energy_density(Z, beta)
+        append!(f_list, f)
+        println("Temperature: ", temp, ", Partition function: ", Z, ", Free energy density: ", f)
+        println("-----------------------------------------")
+    end
+    if max_dim_idx == 1
+        scatter(temp_list, f_list, marker = rand(available_markers), label = "$(max_dim)")
+    else
+        scatter!(temp_list, f_list, marker = rand(available_markers), label = "$(max_dim)")
+    end
+end
+title!("Lattice size $(N)x$(N)")
+plot!(legend=:outerbottom, legendcolumns = length(max_dim_list))
+
+
