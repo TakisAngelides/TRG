@@ -225,7 +225,7 @@ function coarse_grain(A, nsv, norms)
     # Contract the F_1, F_2, F_3, F_4 to obtain the new coarse grained A tensor
     tmp_1 = contraction(F_1, (2,), F_4, (3,)) # t, s1, s2', b 
     tmp_2 = contraction(F_2, (2,), F_3, (3,)) # t, s2, s1', b
-    tmp_3 = contraction(tmp_1, (1, 4), tmp_2, (1, 4)) # s1, s2', s2, s1'
+    tmp_3 = contraction(tmp_1, (1, 4), tmp_2, (1, 4)) # s1, s2', s2, s1' : this is the biggest cost of the algorithm's subroutine (which is performed log(N_tensors) times) and has cost order(bond dimension ^ 6) - see page 26 of https://libstore.ugent.be/fulltxt/RUG01/002/836/279/RUG01-002836279_2020_0001_AC.pdf
 
     # Permute the indices into the order of the convention
     A_final = permutedims(tmp_3, (2, 1, 3, 4)) # s2', s1, s2, s1' (here we are effectively tilting the lattice back into its original orientation but the tilting rotation direction does not matter i.e. if its anti-clockwise or clockwise)
